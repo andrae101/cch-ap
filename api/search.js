@@ -1,21 +1,25 @@
-// api/search.js
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { company_name } = req.query;
+
+  if (!company_name) {
+    return res.status(400).json({ error: "Missing required parameter: company_name" });
+  }
 
   try {
-    const { q = "", ...rest } = req.query || {};
-    // Remotive uses "search=" param; pass through any other filters too
-    const params = new URLSearchParams({ search: q });
-    for (const [k, v] of Object.entries(rest)) {
-      if (v !== undefined && v !== "") params.append(k, v);
-    }
+    const response = await fetch("https://remotive.com/api/remote-jobs");
+    const data = await response.json();
 
-    const url = `https://remotive.com/api/remote-jobs?${params.toString()}`;
-    const r = await fetch(url);
-    const data = await r.json();
+    // Filter jobs by company name (case-insensitive)
+    const filteredJobs = data.jobs.filter(job =>
+      job.company_name.toLowerCase().includes(company_name.toLowerCase())
+    );
 
-    res.status(r.ok ? 200 : 500).json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message || "Search failed" });
+    res.status(200).json({
+      query: company_name,
+      results: filteredJobs,
+      total: filteredJobs.length,
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch jobs", details: error.message });
   }
 }
