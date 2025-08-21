@@ -1,88 +1,126 @@
 // api/search.js
+// Flexible search endpoint for your jobs proxy.
+// - Works even with NO company_name
+// - Supports keyword, company, location, category, job_type
+// - Pagination with page & limit
+// - raw=true returns full job objects; default returns a simplified list
+
 export default async function handler(req, res) {
-  // Allow simple CORS (handy if you call this from your site)
+  // CORS (basic)
   res.setHeader("Access-Control-Allow-Origin", "*");
-
-  // Read query params (all optional)
-  const {
-    query = "",                 // general text search
-    company_name = "",          // filter by company (case-insensitive contains)
-    location = "",              // filter by location text (matches candidate_required_location)
-    category = "",              // exact match with Remotive "category"
-    job_type = "",              // exact match with Remotive "job_type" (e.g., "full_time", "contract")
-    page = "1",                 // 1-based page
-    limit = "25"                // page size
-  } = req.query || {};
-
-  // Parse pagination safely
-  const PAGE = Math.max(1, parseInt(page, 10) || 1);
-  const LIMIT = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    // Build Remotive URL
-    // If query is present, include it; otherwise call the base endpoint (returns latest jobs)
-    const base = "https://remotive.com/api/remote-jobs";
-    const url = query ? `${base}?search=${encodeURIComponent(query)}` : base;
+    // ---- Parse & sanitize query params ----
+    const {
+      query = "",                // keyword
+      company_name = "",         // filter by company
+      location = "",             // filter by country/region text
+      category = "",             // e.g. "Software Development"
+      job_type = "",             // e.g. "full_time"
+      page = "1",                // 1-based
+      limit = "25",              // items per page
+      raw = "false",             // raw=true -> full objects
+    } = req.query || {};
 
-    const r = await fetch(url);
+    const p = Math.max(1, parseInt(page, 10) || 1);
+    const lim = Math.min(50, Math.max(1, parseInt(limit, 10) || 25)); // cap at 50
+
+    // ---- Fetch from Remotive (keyword only; other filters done here) ----
+    const url = `https://remotive.com/api/remote-jobs?search=${encodeURIComponent(
+      query || ""
+    )}`;
+
+    const r = await fetch(url, { headers: { "User-Agent": "CCH-API/1.0" } });
     if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      return res.status(502).json({ error: "Upstream API error", status: r.status, body: text });
+      return res.status(r.status).json({
+        ok: false,
+        error: `Upstream error ${r.status}`,
+      });
     }
-    const data = await r.json();
+    const upstream = await r.json();
+    const jobs = Array.isArray(upstream.jobs) ? upstream.jobs : [];
 
-    // Normalize & filter safely
-    const q = (query || "").toLowerCase();
-    const cmp = (company_name || "").toLowerCase();
-    const loc = (location || "").toLowerCase();
-    const cat = (category || "").toLowerCase();
-    const jt  = (job_type || "").toLowerCase();
+    // ---- Helpers for filtering ----
+    const norm = (v) => String(v || "").toLowerCase();
+    const includes = (hay, needle) => norm(hay).includes(norm(needle));
 
-    let jobs = Array.isArray(data?.jobs) ? data.jobs : [];
+    // ---- Apply filters (case-insensitive) ----
+    let filtered = jobs;
 
-    jobs = jobs.filter((job) => {
-      // company filter
-      if (cmp && !(job.company_name || "").toLowerCase().includes(cmp)) return false;
+    if (company_name) {
+      filtered = filtered.filter((j) => includes(j.company_name, company_name));
+    }
+    if (location) {
+      filtered = filtered.filter((j) =>
+        includes(j.candidate_required_location, location)
+      );
+    }
+    if (category) {
+      filtered = filtered.filter((j) => norm(j.category) === norm(category));
+    }
+    if (job_type) {
+      filtered = filtered.filter((j) => norm(j.job_type) === norm(job_type));
+    }
 
-      // location filter
-      if (loc && !(job.candidate_required_location || "").toLowerCase().includes(loc)) return false;
+    // ---- Pagination ----
+    const total = filtered.length;
+    const pages = Math.max(1, Math.ceil(total / lim));
+    const start = (p - 1) * lim;
+    const pageSlice = filtered.slice(start, start + lim);
 
-      // category filter (exact, case-insensitive)
-      if (cat && (job.category || "").toLowerCase() !== cat) return false;
+    // ---- Build response ----
+    const meta = {
+      ok: true,
+      query: {
+        query,
+        company_name,
+        location,
+        category,
+        job_type,
+        page: p,
+        limit: lim,
+      },
+      total,
+      pages,
+      count: pageSlice.length,
+    };
 
-      // job_type filter (exact, case-insensitive)
-      if (jt && (job.job_type || "").toLowerCase() !== jt) return false;
+    // raw=true -> return full upstream job objects for this page
+    if (String(raw).toLowerCase() === "true") {
+      return res.status(200).json({
+        ...meta,
+        results: pageSlice,
+      });
+    }
 
-      // If a text query is provided, also match against title/description/company
-      if (q) {
-        const hay = [
-          job.title,
-          job.description,
-          job.company_name,
-          job.tags?.join(" "),
-          job.category
-        ].join(" ").toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-
-      return true;
-    });
-
-    // Pagination
-    const total = jobs.length;
-    const start = (PAGE - 1) * LIMIT;
-    const end   = start + LIMIT;
-    const pageItems = jobs.slice(start, end);
+    // default -> simplified list for easier frontend use
+    const simplified = pageSlice.map((j) => ({
+      id: j.id,
+      url: j.url,
+      title: j.title,
+      company: j.company_name,
+      logo: j.company_logo,
+      category: j.category,
+      tags: j.tags,
+      job_type: j.job_type,
+      date: j.publication_date,
+      location: j.candidate_required_location,
+      salary: j.salary || null,
+      // Keep original HTML so you can render safely in UI if needed
+      description_html: j.description,
+    }));
 
     return res.status(200).json({
-      ok: true,
-      query: { query, company_name, location, category, job_type, page: PAGE, limit: LIMIT },
-      total,
-      pages: Math.max(1, Math.ceil(total / LIMIT)),
-      count: pageItems.length,
-      results: pageItems
+      ...meta,
+      results: simplified,
     });
   } catch (e) {
-    return res.status(500).json({ error: "Failed to fetch jobs", details: e.message });
+    return res.status(500).json({
+      ok: false,
+      error: e.message || "Search failed",
+    });
   }
 }
