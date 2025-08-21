@@ -1,40 +1,88 @@
-// /api/search.js
+// api/search.js
 export default async function handler(req, res) {
-  const { query } = req.query; // query param e.g. /api/search?query=Amazon
+  // Allow simple CORS (handy if you call this from your site)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
+  // Read query params (all optional)
+  const {
+    query = "",                 // general text search
+    company_name = "",          // filter by company (case-insensitive contains)
+    location = "",              // filter by location text (matches candidate_required_location)
+    category = "",              // exact match with Remotive "category"
+    job_type = "",              // exact match with Remotive "job_type" (e.g., "full_time", "contract")
+    page = "1",                 // 1-based page
+    limit = "25"                // page size
+  } = req.query || {};
+
+  // Parse pagination safely
+  const PAGE = Math.max(1, parseInt(page, 10) || 1);
+  const LIMIT = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
 
   try {
-    // Fetch jobs from your jobs endpoint
-    const response = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL}/api/jobs`);
-    const data = await response.json();
+    // Build Remotive URL
+    // If query is present, include it; otherwise call the base endpoint (returns latest jobs)
+    const base = "https://remotive.com/api/remote-jobs";
+    const url = query ? `${base}?search=${encodeURIComponent(query)}` : base;
 
-    // If no query, just return all jobs
-    if (!query) {
-      return res.status(200).json({
-        query: null,
-        results: data.jobs,
-        total: data.jobs.length,
-      });
+    const r = await fetch(url);
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      return res.status(502).json({ error: "Upstream API error", status: r.status, body: text });
     }
+    const data = await r.json();
 
-    // Lowercase for matching
-    const search = query.toLowerCase();
+    // Normalize & filter safely
+    const q = (query || "").toLowerCase();
+    const cmp = (company_name || "").toLowerCase();
+    const loc = (location || "").toLowerCase();
+    const cat = (category || "").toLowerCase();
+    const jt  = (job_type || "").toLowerCase();
 
-    // Filter across multiple fields
-    const filtered = data.jobs.filter((job) => {
-      return (
-        job.company_name?.toLowerCase().includes(search) ||
-        job.title?.toLowerCase().includes(search) ||
-        job.description?.toLowerCase().includes(search) ||
-        job.tags?.some((tag) => tag.toLowerCase().includes(search))
-      );
+    let jobs = Array.isArray(data?.jobs) ? data.jobs : [];
+
+    jobs = jobs.filter((job) => {
+      // company filter
+      if (cmp && !(job.company_name || "").toLowerCase().includes(cmp)) return false;
+
+      // location filter
+      if (loc && !(job.candidate_required_location || "").toLowerCase().includes(loc)) return false;
+
+      // category filter (exact, case-insensitive)
+      if (cat && (job.category || "").toLowerCase() !== cat) return false;
+
+      // job_type filter (exact, case-insensitive)
+      if (jt && (job.job_type || "").toLowerCase() !== jt) return false;
+
+      // If a text query is provided, also match against title/description/company
+      if (q) {
+        const hay = [
+          job.title,
+          job.description,
+          job.company_name,
+          job.tags?.join(" "),
+          job.category
+        ].join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+
+      return true;
     });
+
+    // Pagination
+    const total = jobs.length;
+    const start = (PAGE - 1) * LIMIT;
+    const end   = start + LIMIT;
+    const pageItems = jobs.slice(start, end);
 
     return res.status(200).json({
-      query,
-      results: filtered,
-      total: filtered.length,
+      ok: true,
+      query: { query, company_name, location, category, job_type, page: PAGE, limit: LIMIT },
+      total,
+      pages: Math.max(1, Math.ceil(total / LIMIT)),
+      count: pageItems.length,
+      results: pageItems
     });
-  } catch (err) {
-    return res.status(500).json({ error: "Failed to fetch jobs", details: err.message });
+  } catch (e) {
+    return res.status(500).json({ error: "Failed to fetch jobs", details: e.message });
   }
 }
