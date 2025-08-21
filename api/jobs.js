@@ -1,32 +1,24 @@
 // api/jobs.js
 export default async function handler(req, res) {
+  // Allow use from your site
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
   try {
-    // Grab query params (like ?search=design or ?category=software-dev)
-    const { search, category, company_name } = req.query;
+    // Base Remotive API
+    const base = "https://remotive.com/api/remote-jobs";
 
-    // Build base URL
-    let url = "https://remotive.com/api/remote-jobs";
-
-    // Add query params if provided
+    // Forward any query string you receive (?search=, ?category=, etc.)
     const params = new URLSearchParams();
-    if (search) params.append("search", search);
-    if (category) params.append("category", category);
-    if (company_name) params.append("company_name", company_name);
-
-    if ([...params].length > 0) {
-      url += `?${params.toString()}`;
+    for (const [k, v] of Object.entries(req.query || {})) {
+      if (v !== undefined && v !== "") params.append(k, v);
     }
 
-    // Fetch jobs
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Remotive API error: ${response.status}`);
-    }
+    const url = params.toString() ? `${base}?${params.toString()}` : base;
+    const r = await fetch(url);
+    const data = await r.json();
 
-    const data = await response.json();
-    res.status(200).json(data);
-
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch jobs", details: error.message });
+    res.status(r.ok ? 200 : 500).json(data);
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch jobs", detail: e.message });
   }
 }
